@@ -1,0 +1,47 @@
+server:
+  port: 8081
+  error:
+    path: /user/error
+    whitelabel:
+      enabled: false
+jwt:
+  secret: MbSm+cbkvS7Mo9V/ingpKv6Gtfj6E9ZD5DvSTszDslEoLYxJNGNPBlo9bD83kJOc
+
+spring:
+#  autoconfigure:
+#    exclude: org.springframework.boot.autoconfigure.security.servlet.SecurityAutoConfiguration
+  datasource:
+    url: jdbc:postgresql://localhost:5432/myappdb
+    username: admin
+    password: my-secret-pw
+  jpa:
+    #database-platform: org.hibernate.dialect.MySQL8InnoDBDialect
+    #https://www.asciiart.eu/text-to-ascii-art
+    generate-ddl: true #true for init
+    show-sql: true
+    hibernate:
+      ddl-auto: update #The values create, create-drop, validate, and update. update for init
+    properties:
+      hibernate:
+        globally_quoted_indentifiers: true
+        #dialect: org.hibernate.dialect.MySQL8Dialect
+        format_sql: true
+  sql:
+     init:
+       mode: never
+       continue-on-error: false
+  mail:
+    host: smtp.gmail.com
+    port: 587
+    username: somemailid@mail.com
+    password: emailpassword #get from https://myaccount.google.com/security  https://www.youtube.com/watch?v=FYq9yWgrO8o
+    properties:
+      mail:
+        smtp:
+          writetimeout: 5000
+          connectiontimeout: 5000
+          timeout: 5000
+          auth: true
+          starttls:
+            enable: true
+            required: true
