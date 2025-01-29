@@ -13,7 +13,7 @@ spring:
   datasource:
     url: jdbc:postgresql://localhost:5432/myappdb
     username: admin
-    password: my-secret-pw
+    password: something
   jpa:
     #database-platform: org.hibernate.dialect.MySQL8InnoDBDialect
     #https://www.asciiart.eu/text-to-ascii-art
