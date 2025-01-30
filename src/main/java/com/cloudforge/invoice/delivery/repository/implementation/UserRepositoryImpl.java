@@ -10,6 +10,7 @@ import com.cloudforge.invoice.delivery.form.UpdateForm;
 import com.cloudforge.invoice.delivery.repository.RoleRepository;
 import com.cloudforge.invoice.delivery.repository.UserRepository;
 import com.cloudforge.invoice.delivery.rowmapper.UserRowMapper;
+import com.cloudforge.invoice.delivery.utils.SmsUtils;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.EmptyResultDataAccessException;
@@ -29,15 +30,17 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.LocalDate;
 import java.util.Collection;
 import java.util.Date;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
 import static com.cloudforge.invoice.delivery.query.UserQuery.*;
+import static com.cloudforge.invoice.delivery.utils.SmsUtils.sendSMS;
 import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
 import static java.util.Map.of;
-import static java.util.Objects.requireNonNull;
 import static org.apache.commons.lang3.RandomStringUtils.randomAlphabetic;
 import static org.apache.commons.lang3.time.DateUtils.addDays;
 import static org.springframework.web.servlet.support.ServletUriComponentsBuilder.fromCurrentContextPath;
@@ -59,25 +62,43 @@ public class UserRepositoryImpl implements UserRepository<User>, UserDetailsServ
     private final RoleRepository<Role> roleRepository;
     private final BCryptPasswordEncoder encoder;
     private final EmailService emailService;
+    //private final SmsUtils smsUtils;
 
     @Override
     public User create(User user) {
-        if(getEmailCount(user.getEmail().trim().toLowerCase()) > 0) throw new ApiException("Email already in use. Please use a different email and try again.");
+        log.info("Creating user with email: {}", user.getEmail());
+        if (getEmailCount(user.getEmail().trim().toLowerCase()) > 0) {
+            log.warn("Email already in use: {}", user.getEmail());
+            throw new ApiException("Email already in use. Please use a different email and try again.");
+        }
         try {
             KeyHolder holder = new GeneratedKeyHolder();
             SqlParameterSource parameters = getSqlParameterSource(user);
             jdbc.update(INSERT_USER_QUERY, parameters, holder);
-            user.setId(requireNonNull(holder.getKey()).longValue());
+            Map<String, Object> keys = holder.getKeys();
+            if (keys != null) {
+                user.setId(((Number) keys.get("id")).longValue());
+                log.info("User created with ID: {}", user.getId());
+            } else {
+                throw new ApiException("User ID not generated.");
+            }
+
             roleRepository.addRoleToUser(user.getId(), ROLE_USER.name());
             String verificationUrl = getVerificationUrl(UUID.randomUUID().toString(), ACCOUNT.getType());
-            jdbc.update(INSERT_ACCOUNT_VERIFICATION_URL_QUERY, of("userId", user.getId(), "url", verificationUrl));
+            jdbc.update(INSERT_ACCOUNT_VERIFICATION_URL_QUERY, of(
+                    "userId", user.getId(),
+                    "url", verificationUrl,
+                    "date", LocalDate.now()
+                    )
+            );
             sendEmail(user.getFirstName(), user.getEmail(), verificationUrl, ACCOUNT);
+
             user.setEnabled(false);
             user.setNotLocked(true);
-            System.out.println(verificationUrl);
+            log.info("User creation completed: {}", user);
             return user;
         } catch (Exception exception) {
-            log.error(exception.getMessage());
+            log.error("Error creating user: {}", exception.getMessage());
             throw new ApiException("An error occurred. Please try again.");
         }
     }
@@ -89,12 +110,16 @@ public class UserRepositoryImpl implements UserRepository<User>, UserDetailsServ
 
     @Override
     public User get(Long id) {
+        log.info("Fetching user with ID: {}", id);
         try {
-            return jdbc.queryForObject(SELECT_USER_BY_ID_QUERY, of("id", id), new UserRowMapper());
+            User user = jdbc.queryForObject(SELECT_USER_BY_ID_QUERY, of("id", id), new UserRowMapper());
+            log.info("User fetched successfully: {}", user);
+            return user;
         } catch (EmptyResultDataAccessException exception) {
+            log.warn("No User found by ID: {}", id);
             throw new ApiException("No User found by id: " + id);
         } catch (Exception exception) {
-            log.error(exception.getMessage());
+            log.error("Error fetching user: {}", exception.getMessage());
             throw new ApiException("An error occurred. Please try again.");
         }
     }
@@ -116,7 +141,7 @@ public class UserRepositoryImpl implements UserRepository<User>, UserDetailsServ
     @Override
     public UserDetails loadUserByUsername(String email) throws UsernameNotFoundException {
         User user = getUserByEmail(email);
-        if(user == null) {
+        if (user == null) {
             log.error("User not found in the database");
             throw new UsernameNotFoundException("User not found in the database");
         } else {
@@ -127,39 +152,42 @@ public class UserRepositoryImpl implements UserRepository<User>, UserDetailsServ
 
     @Override
     public User getUserByEmail(String email) {
+        log.info("Fetching user with email: {}", email);
         try {
             User user = jdbc.queryForObject(SELECT_USER_BY_EMAIL_QUERY, of("email", email), new UserRowMapper());
+            log.info("User fetched successfully: {}", user);
             return user;
         } catch (EmptyResultDataAccessException exception) {
+            log.warn("No User found by email: {}", email);
             throw new ApiException("No User found by email: " + email);
         } catch (Exception exception) {
-            log.error(exception.getMessage());
+            log.error("Error fetching user by email: {}", exception.getMessage());
             throw new ApiException("An error occurred. Please try again.");
         }
     }
 
     @Override
     public void sendVerificationCode(UserDTO user) {
-        String expirationDate = format(addDays(new Date(), 1), DATE_FORMAT);
+        log.info("Generating verification code for user ID: {}", user.getId());
         String verificationCode = randomAlphabetic(8).toUpperCase();
         try {
             jdbc.update(DELETE_VERIFICATION_CODE_BY_USER_ID, of("id", user.getId()));
-            jdbc.update(INSERT_VERIFICATION_CODE_QUERY, of("userId", user.getId(), "code", verificationCode, "expirationDate", expirationDate));
-            //sendSMS(user.getPhone(), "From: SecureCapita \nVerification code\n" + verificationCode);
-            log.info("Verification Code: {}", verificationCode);
+            jdbc.update(INSERT_VERIFICATION_CODE_QUERY, of("userId", user.getId(), "code", verificationCode));
+            sendSMS(user.getPhone(), "From: SecureCapita \nVerification code\n" + verificationCode);
+            log.info("Verification Code generated: {}", verificationCode);
         } catch (Exception exception) {
-            log.error(exception.getMessage());
+            log.error("Error generating verification code: {}", exception.getMessage());
             throw new ApiException("An error occurred. Please try again.");
         }
     }
 
     @Override
     public User verifyCode(String email, String code) {
-        if(isVerificationCodeExpired(code)) throw new ApiException("This code has expired. Please login again.");
+        if (isVerificationCodeExpired(code)) throw new ApiException("This code has expired. Please login again.");
         try {
             User userByCode = jdbc.queryForObject(SELECT_USER_BY_USER_CODE_QUERY, of("code", code), new UserRowMapper());
             User userByEmail = jdbc.queryForObject(SELECT_USER_BY_EMAIL_QUERY, of("email", email), new UserRowMapper());
-            if(userByCode.getEmail().equalsIgnoreCase(userByEmail.getEmail())) {
+            if (userByCode.getEmail().equalsIgnoreCase(userByEmail.getEmail())) {
                 jdbc.update(DELETE_CODE, of("code", code));
                 return userByCode;
             } else {
@@ -174,15 +202,16 @@ public class UserRepositoryImpl implements UserRepository<User>, UserDetailsServ
 
     @Override
     public void resetPassword(String email) {
-        if(getEmailCount(email.trim().toLowerCase()) <= 0) throw new ApiException("There is no account for this email address.");
+        if (getEmailCount(email.trim().toLowerCase()) <= 0)
+            throw new ApiException("There is no account for this email address.");
         try {
-                String expirationDate = format(addDays(new Date(), 1), DATE_FORMAT);
-                User user = getUserByEmail(email);
-                String verificationUrl = getVerificationUrl(UUID.randomUUID().toString(), PASSWORD.getType());
-                jdbc.update(DELETE_PASSWORD_VERIFICATION_BY_USER_ID_QUERY, of("userId",  user.getId()));
-                jdbc.update(INSERT_PASSWORD_VERIFICATION_QUERY, of("userId",  user.getId(), "url", verificationUrl, "expirationDate", expirationDate));
-                sendEmail(user.getFirstName(), email, verificationUrl, PASSWORD);
-                log.info("Verification URL: {}", verificationUrl);
+            String expirationDate = format(addDays(new Date(), 1), DATE_FORMAT);
+            User user = getUserByEmail(email);
+            String verificationUrl = getVerificationUrl(UUID.randomUUID().toString(), PASSWORD.getType());
+            jdbc.update(DELETE_PASSWORD_VERIFICATION_BY_USER_ID_QUERY, of("userId", user.getId()));
+            jdbc.update(INSERT_PASSWORD_VERIFICATION_QUERY, of("userId", user.getId(), "url", verificationUrl, "expirationDate", expirationDate));
+            sendEmail(user.getFirstName(), email, verificationUrl, PASSWORD);
+            log.info("Verification URL: {}", verificationUrl);
         } catch (Exception exception) {
             throw new ApiException("An error occurred. Please try again.");
         }
@@ -190,7 +219,8 @@ public class UserRepositoryImpl implements UserRepository<User>, UserDetailsServ
 
     @Override
     public User verifyPasswordKey(String key) {
-        if(isLinkExpired(key, PASSWORD)) throw new ApiException("This link has expired. Please reset your password again.");
+        if (isLinkExpired(key, PASSWORD))
+            throw new ApiException("This link has expired. Please reset your password again.");
         try {
             User user = jdbc.queryForObject(SELECT_USER_BY_PASSWORD_URL_QUERY, of("url", getVerificationUrl(key, PASSWORD.getType())), new UserRowMapper());
             //jdbc.update("DELETE_USER_FROM_PASSWORD_VERIFICATION_QUERY", of("id", user.getId())); //Depends on use case / developer or business
@@ -206,7 +236,7 @@ public class UserRepositoryImpl implements UserRepository<User>, UserDetailsServ
 
     @Override
     public void renewPassword(String key, String password, String confirmPassword) {
-        if(!password.equals(confirmPassword)) throw new ApiException("Passwords don't match. Please try again.");
+        if (!password.equals(confirmPassword)) throw new ApiException("Passwords don't match. Please try again.");
         try {
             jdbc.update(UPDATE_USER_PASSWORD_BY_URL_QUERY, of("password", encoder.encode(password), "url", getVerificationUrl(key, PASSWORD.getType())));
             jdbc.update(DELETE_VERIFICATION_BY_URL_QUERY, of("url", getVerificationUrl(key, PASSWORD.getType())));
@@ -215,9 +245,10 @@ public class UserRepositoryImpl implements UserRepository<User>, UserDetailsServ
             throw new ApiException("An error occurred. Please try again.");
         }
     }
+
     @Override
     public void renewPassword(Long userId, String password, String confirmPassword) {
-        if(!password.equals(confirmPassword)) throw new ApiException("Passwords don't match. Please try again.");
+        if (!password.equals(confirmPassword)) throw new ApiException("Passwords don't match. Please try again.");
         try {
             jdbc.update(UPDATE_USER_PASSWORD_BY_USER_ID_QUERY, of("id", userId, "password", encoder.encode(password)));
             //jdbc.update(DELETE_PASSWORD_VERIFICATION_BY_USER_ID_QUERY, of("userId", userId));
@@ -229,24 +260,40 @@ public class UserRepositoryImpl implements UserRepository<User>, UserDetailsServ
 
     @Override
     public User verifyAccountKey(String key) {
+        log.info("Verifying account with key: {}", key);
         try {
-            User user = jdbc.queryForObject(SELECT_USER_BY_ACCOUNT_URL_QUERY, of("url", getVerificationUrl(key, ACCOUNT.getType())), new UserRowMapper());
+            String verificationUrl = getVerificationUrl(key, ACCOUNT.getType());
+            log.debug("Generated verification URL: {}", verificationUrl);
+
+            User user = jdbc.queryForObject(
+                    SELECT_USER_BY_ACCOUNT_URL_QUERY,
+                    of("url", verificationUrl),
+                    new UserRowMapper()
+            );
+
+            log.info("User found for verification. ID: {}, Email: {}", user.getId(), user.getEmail());
+
             jdbc.update(UPDATE_USER_ENABLED_QUERY, of("enabled", true, "id", user.getId()));
+            log.info("User account enabled successfully. ID: {}", user.getId());
+
             // Delete after updating - depends on your requirements
             return user;
         } catch (EmptyResultDataAccessException exception) {
+            log.warn("Invalid verification link used: {}", key);
             throw new ApiException("This link is not valid.");
         } catch (Exception exception) {
+            log.error("Error verifying account for key: {}. Exception: {}", key, exception.getMessage());
             throw new ApiException("An error occurred. Please try again.");
         }
     }
+
 
     @Override
     public User updateUserDetails(UpdateForm user) {
         try {
             jdbc.update(UPDATE_USER_DETAILS_QUERY, getUserDetailsSqlParameterSource(user));
             return get(user.getId());
-        }catch (EmptyResultDataAccessException exception) {
+        } catch (EmptyResultDataAccessException exception) {
             throw new ApiException("No User found by id: " + user.getId());
         } catch (Exception exception) {
             log.error(exception.getMessage());
@@ -256,15 +303,22 @@ public class UserRepositoryImpl implements UserRepository<User>, UserDetailsServ
 
     @Override
     public void updatePassword(Long id, String currentPassword, String newPassword, String confirmNewPassword) {
-        if(!newPassword.equals(confirmNewPassword)) { throw new ApiException("Passwords don't match. Please try again."); }
+        log.info("Updating password for user ID: {}", id);
+        if (!newPassword.equals(confirmNewPassword)) {
+            log.warn("Passwords do not match for user ID: {}", id);
+            throw new ApiException("Passwords don't match. Please try again.");
+        }
         User user = get(id);
-        if(encoder.matches(currentPassword, user.getPassword())) {
+        if (encoder.matches(currentPassword, user.getPassword())) {
             try {
                 jdbc.update(UPDATE_USER_PASSWORD_BY_ID_QUERY, of("userId", id, "password", encoder.encode(newPassword)));
-            }  catch (Exception exception) {
+                log.info("Password updated successfully for user ID: {}", id);
+            } catch (Exception exception) {
+                log.error("Error updating password: {}", exception.getMessage());
                 throw new ApiException("An error occurred. Please try again.");
             }
         } else {
+            log.warn("Incorrect current password for user ID: {}", id);
             throw new ApiException("Incorrect current password. Please try again.");
         }
     }
@@ -282,7 +336,9 @@ public class UserRepositoryImpl implements UserRepository<User>, UserDetailsServ
     @Override
     public User toggleMfa(String email) {
         User user = getUserByEmail(email);
-        if(isBlank(user.getPhone())) { throw new ApiException("You need a phone number to change Multi-Factor Authentication"); }
+        if (isBlank(user.getPhone())) {
+            throw new ApiException("You need a phone number to change Multi-Factor Authentication");
+        }
         user.setUsingMfa(!user.isUsingMfa());
         try {
             jdbc.update(TOGGLE_USER_MFA_QUERY, of("email", email, "isUsingMfa", user.isUsingMfa()));
@@ -295,11 +351,12 @@ public class UserRepositoryImpl implements UserRepository<User>, UserDetailsServ
 
     @Override
     public void updateImage(UserDTO user, MultipartFile image) {
+        log.info("Updating image for user: {}", user.getEmail());
         String userImageUrl = setUserImageUrl(user.getEmail());
         user.setImageUrl(userImageUrl);
         saveImage(user.getEmail(), image);
         jdbc.update(UPDATE_USER_IMAGE_QUERY, of("imageUrl", userImageUrl, "id", user.getId()));
-
+        log.info("Successfully updated image for user: {}", user.getEmail());
     }
 
     private void sendEmail(String firstName, String email, String verificationUrl, VerificationType verificationType) {
@@ -341,23 +398,24 @@ public class UserRepositoryImpl implements UserRepository<User>, UserDetailsServ
     }
 
     private void saveImage(String email, MultipartFile image) {
+        log.info("Saving image for user: {}", email);
         Path fileStorageLocation = Paths.get(System.getProperty("user.home") + "/Downloads/images/").toAbsolutePath().normalize();
-        if(!Files.exists(fileStorageLocation)) {
+        if (!Files.exists(fileStorageLocation)) {
             try {
                 Files.createDirectories(fileStorageLocation);
+                log.info("Created directories: {}", fileStorageLocation);
             } catch (Exception exception) {
-                log.error(exception.getMessage());
+                log.error("Error creating directories: {}", exception.getMessage());
                 throw new ApiException("Unable to create directories to save image");
             }
-            log.info("Created directories: {}", fileStorageLocation);
         }
         try {
             Files.copy(image.getInputStream(), fileStorageLocation.resolve(email + ".png"), REPLACE_EXISTING);
+            log.info("File saved successfully in: {} folder", fileStorageLocation);
         } catch (IOException exception) {
-            log.error(exception.getMessage());
+            log.error("Error saving image: {}", exception.getMessage());
             throw new ApiException(exception.getMessage());
         }
-        log.info("File saved in: {} folder", fileStorageLocation);
     }
 
     private Boolean isLinkExpired(String key, VerificationType password) {

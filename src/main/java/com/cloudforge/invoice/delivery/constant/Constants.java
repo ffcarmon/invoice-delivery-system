@@ -3,7 +3,8 @@ package com.cloudforge.invoice.delivery.constant;
 public class Constants {
     // Security
     public static final String[] PUBLIC_URLS = { "/user/verify/password/**",
-            "/user/login/**", "/user/verify/code/**", "/user/register/**", "/user/resetpassword/**", "/user/verify/account/**",
+            "/user/login/**", "/user/verify/code/**",
+            "/user/register/**", "/user/resetpassword/**", "/user/verify/account/**",
             "/user/refresh/token/**", "/user/image/**", "/user/new/password/**" };
     public static final String TOKEN_PREFIX = "Bearer ";
     public static final String[] PUBLIC_ROUTES = { "/user/new/password", "/user/login", "/user/verify/code", "/user/register", "/user/refresh/token", "/user/image" };

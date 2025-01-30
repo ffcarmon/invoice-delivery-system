@@ -20,10 +20,10 @@ public class EmailServiceImpl implements EmailService {
     public void sendVerificationEmail(String firstName, String email, String verificationUrl, VerificationType verificationType) {
         try{
             SimpleMailMessage message = new SimpleMailMessage();
-            message.setFrom("<your email>");
+            message.setFrom("playman.it.services@gmail.com");
             message.setTo(email);
             message.setText(getEmailMessage(firstName, verificationUrl, verificationType));
-            message.setSubject(String.format("SecureCapita - %s Verification Email", StringUtils.capitalize(verificationType.getType())));
+            message.setSubject(String.format("Invoice Delivery System - %s Verification Email", StringUtils.capitalize(verificationType.getType())));
             mailSender.send(message);
             log.info("Email sent to {}", firstName);
     } catch (Exception exception) {

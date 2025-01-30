@@ -9,5 +9,6 @@ public class EventQuery {
 
     public static final String INSERT_EVENT_BY_USER_EMAIL_QUERY =
             "INSERT INTO UserEvents (user_id, event_id, device, ip_address) " +
-                    "VALUES ((SELECT id FROM Users WHERE email = :email), (SELECT id FROM Events WHERE type = :type), :device, :ipAddress)";
+                    "VALUES ((SELECT id FROM Users WHERE email = :email), " +
+                    "(SELECT id FROM Events WHERE type = :type), :device, :ipAddress)";
 }

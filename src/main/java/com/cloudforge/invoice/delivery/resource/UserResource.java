@@ -35,12 +35,20 @@ import static java.util.Map.of;
 import static org.springframework.http.HttpStatus.*;
 import static org.springframework.security.authentication.UsernamePasswordAuthenticationToken.unauthenticated;
 import static org.springframework.web.servlet.support.ServletUriComponentsBuilder.fromCurrentContextPath;
+import static org.springframework.http.HttpHeaders.AUTHORIZATION;
+import static org.springframework.http.MediaType.IMAGE_PNG_VALUE;
+
+import org.springframework.web.multipart.MultipartFile;
+
+import java.nio.file.Files;
+import java.nio.file.Paths;
 
 @Slf4j
 @RestController
 @RequestMapping(path = "/user")
 @RequiredArgsConstructor
 public class UserResource {
+    private static final String TOKEN_PREFIX = "Bearer ";
     private final UserService userService;
     private final RoleService roleService;
     private final EventService eventService;
@@ -52,18 +60,14 @@ public class UserResource {
 
     @PostMapping("/login")
     public ResponseEntity<HttpResponse> login(@RequestBody @Valid LoginForm loginForm) {
-        log.info("Attempting login for email: {}", loginForm.getEmail());
         UserDTO user = authenticate(loginForm.getEmail(), loginForm.getPassword());
-        log.info("Login {} for email: {}", user.isUsingMfa() ? "requires MFA" : "successful", loginForm.getEmail());
         return user.isUsingMfa() ? sendVerificationCode(user) : sendResponse(user);
     }
 
     @PostMapping("/register")
     public ResponseEntity<HttpResponse> saveUser(@RequestBody @Valid User user) throws InterruptedException {
-        log.info("Registering new user: {} {}", user.getFirstName(), user.getLastName());
-        TimeUnit.SECONDS.sleep(4);
+        //TimeUnit.SECONDS.sleep(4);
         UserDTO userDto = userService.createUser(user);
-        log.info("User registered successfully: {}", user.getEmail());
         return ResponseEntity.created(getUri()).body(
                 HttpResponse.builder()
                         .timeStamp(now().toString())
@@ -76,9 +80,7 @@ public class UserResource {
 
     @GetMapping("/profile")
     public ResponseEntity<HttpResponse> profile(Authentication authentication) {
-        log.info("Fetching profile for authenticated user.");
         UserDTO user = userService.getUserByEmail(getAuthenticatedUser(authentication).getEmail());
-        log.info("Profile retrieved for user: {}", user.getEmail());
         return ResponseEntity.ok().body(
                 HttpResponse.builder()
                         .timeStamp(now().toString())
@@ -91,9 +93,7 @@ public class UserResource {
 
     @PatchMapping("/update")
     public ResponseEntity<HttpResponse> updateUser(@RequestBody @Valid UpdateForm user) {
-        log.info("Updating user details for user ID: {}", user.getId());
         UserDTO updatedUser = userService.updateUserDetails(user);
-        log.info("User details updated successfully for user ID: {}", user.getId());
         publisher.publishEvent(new NewUserEvent(updatedUser.getEmail(), PROFILE_UPDATE));
         return ResponseEntity.ok().body(
                 HttpResponse.builder()
@@ -105,39 +105,272 @@ public class UserResource {
                         .build());
     }
 
-    // Additional methods will follow a similar pattern for logging operations.
+    // START - To reset password when user is not logged in
+
+    @GetMapping("/verify/code/{email}/{code}")
+    public ResponseEntity<HttpResponse> verifyCode(@PathVariable("email") String email, @PathVariable("code") String code) {
+        UserDTO user = userService.verifyCode(email, code);
+        publisher.publishEvent(new NewUserEvent(user.getEmail(), LOGIN_ATTEMPT_SUCCESS));
+        return ResponseEntity.ok().body(
+                HttpResponse.builder()
+                        .timeStamp(now().toString())
+                        .data(of("user", user, "access_token", tokenProvider.createAccessToken(getUserPrincipal(user))
+                                , "refresh_token", tokenProvider.createRefreshToken(getUserPrincipal(user))))
+                        .message("Login Success")
+                        .status(OK)
+                        .statusCode(OK.value())
+                        .build());
+    }
+
+    @GetMapping("/resetpassword/{email}")
+    public ResponseEntity<HttpResponse> resetPassword(@PathVariable("email") String email) {
+        userService.resetPassword(email);
+        return ResponseEntity.ok().body(
+                HttpResponse.builder()
+                        .timeStamp(now().toString())
+                        .message("Email sent. Please check your email to reset your password.")
+                        .status(OK)
+                        .statusCode(OK.value())
+                        .build());
+    }
+
+    @GetMapping("/verify/account/{key}")
+    public ResponseEntity<HttpResponse> verifyAccount(@PathVariable("key") String key) throws InterruptedException {
+        log.info("Received request to verify account with key: {}", key);
+        TimeUnit.SECONDS.sleep(3);
+
+        boolean isEnabled;
+        try {
+            isEnabled = userService.verifyAccountKey(key).isEnabled();
+            log.info("Account verification successful for key: {}. Enabled status: {}", key, isEnabled);
+        } catch (Exception e) {
+            log.error("Error verifying account for key: {}. Exception: {}", key, e.getMessage());
+            throw new ApiException("Failed to verify account. Please try again.");
+        }
+
+        String message = isEnabled ? "Account already verified" : "Account verified";
+        log.info("Verification response: {}", message);
+
+        return ResponseEntity.ok().body(
+                HttpResponse.builder()
+                        .timeStamp(now().toString())
+                        .message(message)
+                        .status(OK)
+                        .statusCode(OK.value())
+                        .build()
+        );
+    }
+
+
+    @GetMapping("/verify/password/{key}")
+    public ResponseEntity<HttpResponse> verifyPasswordUrl(@PathVariable("key") String key) throws InterruptedException {
+        TimeUnit.SECONDS.sleep(3);
+        UserDTO user = userService.verifyPasswordKey(key);
+        return ResponseEntity.ok().body(
+                HttpResponse.builder()
+                        .timeStamp(now().toString())
+                        .data(of("user", user))
+                        .message("Please enter a new password")
+                        .status(OK)
+                        .statusCode(OK.value())
+                        .build());
+    }
+
+    @PutMapping("/new/password")
+    public ResponseEntity<HttpResponse> resetPasswordWithKey(@RequestBody @Valid NewPasswordForm form) throws InterruptedException {
+        TimeUnit.SECONDS.sleep(3);
+        userService.updatePassword(form.getUserId(), form.getPassword(), form.getConfirmPassword());
+        return ResponseEntity.ok().body(
+                HttpResponse.builder()
+                        .timeStamp(now().toString())
+                        .message("Password reset successfully")
+                        .status(OK)
+                        .statusCode(OK.value())
+                        .build());
+    }
+
+    // END - To reset password when user is not logged in
+
+    @PatchMapping("/update/password")
+    public ResponseEntity<HttpResponse> updatePassword(Authentication authentication, @RequestBody @Valid UpdatePasswordForm form) {
+        UserDTO userDTO = getAuthenticatedUser(authentication);
+        userService.updatePassword(userDTO.getId(), form.getCurrentPassword(), form.getNewPassword(), form.getConfirmNewPassword());
+        publisher.publishEvent(new NewUserEvent(userDTO.getEmail(), PASSWORD_UPDATE));
+        return ResponseEntity.ok().body(
+                HttpResponse.builder()
+                        .timeStamp(now().toString())
+                        .data(of("user", userService.getUserById(userDTO.getId()), "events", eventService.getEventsByUserId(userDTO.getId()), "roles", roleService.getRoles()))
+                        .message("Password updated successfully")
+                        .status(OK)
+                        .statusCode(OK.value())
+                        .build());
+    }
+
+    @PatchMapping("/update/role/{roleName}")
+    public ResponseEntity<HttpResponse> updateUserRole(Authentication authentication, @PathVariable("roleName") String roleName) {
+        UserDTO userDTO = getAuthenticatedUser(authentication);
+        userService.updateUserRole(userDTO.getId(), roleName);
+        publisher.publishEvent(new NewUserEvent(userDTO.getEmail(), ROLE_UPDATE));
+        return ResponseEntity.ok().body(
+                HttpResponse.builder()
+                        .data(of("user", userService.getUserById(userDTO.getId()), "events", eventService.getEventsByUserId(userDTO.getId()), "roles", roleService.getRoles()))
+                        .timeStamp(now().toString())
+                        .message("Role updated successfully")
+                        .status(OK)
+                        .statusCode(OK.value())
+                        .build());
+    }
+
+    @PatchMapping("/update/settings")
+    public ResponseEntity<HttpResponse> updateAccountSettings(Authentication authentication, @RequestBody @Valid SettingsForm form) {
+        UserDTO userDTO = getAuthenticatedUser(authentication);
+        userService.updateAccountSettings(userDTO.getId(), form.getEnabled(), form.getNotLocked());
+        publisher.publishEvent(new NewUserEvent(userDTO.getEmail(), ACCOUNT_SETTINGS_UPDATE));
+        return ResponseEntity.ok().body(
+                HttpResponse.builder()
+                        .data(of("user", userService.getUserById(userDTO.getId()), "events", eventService.getEventsByUserId(userDTO.getId()), "roles", roleService.getRoles()))
+                        .timeStamp(now().toString())
+                        .message("Account settings updated successfully")
+                        .status(OK)
+                        .statusCode(OK.value())
+                        .build());
+    }
+
+    @PatchMapping("/togglemfa")
+    public ResponseEntity<HttpResponse> toggleMfa(Authentication authentication) throws InterruptedException {
+        TimeUnit.SECONDS.sleep(3);
+        UserDTO user = userService.toggleMfa(getAuthenticatedUser(authentication).getEmail());
+        publisher.publishEvent(new NewUserEvent(user.getEmail(), MFA_UPDATE));
+        return ResponseEntity.ok().body(
+                HttpResponse.builder()
+                        .data(of("user", user, "events", eventService.getEventsByUserId(user.getId()), "roles", roleService.getRoles()))
+                        .timeStamp(now().toString())
+                        .message("Multi-Factor Authentication updated")
+                        .status(OK)
+                        .statusCode(OK.value())
+                        .build());
+    }
+
+    @PatchMapping("/update/image")
+    public ResponseEntity<HttpResponse> updateProfileImage(Authentication authentication, @RequestParam("image") MultipartFile image) throws InterruptedException {
+        UserDTO user = getAuthenticatedUser(authentication);
+        userService.updateImage(user, image);
+        publisher.publishEvent(new NewUserEvent(user.getEmail(), PROFILE_PICTURE_UPDATE));
+        return ResponseEntity.ok().body(
+                HttpResponse.builder()
+                        .data(of("user", userService.getUserById(user.getId()), "events", eventService.getEventsByUserId(user.getId()), "roles", roleService.getRoles()))
+                        .timeStamp(now().toString())
+                        .message("Profile image updated")
+                        .status(OK)
+                        .statusCode(OK.value())
+                        .build());
+    }
+
+    @GetMapping(value = "/image/{fileName}", produces = IMAGE_PNG_VALUE)
+    public byte[] getProfileImage(@PathVariable("fileName") String fileName) throws Exception {
+        return Files.readAllBytes(Paths.get(System.getProperty("user.home") + "/Downloads/images/" + fileName));
+    }
+
+    @GetMapping("/refresh/token")
+    public ResponseEntity<HttpResponse> refreshToken(HttpServletRequest request) {
+        if(isHeaderAndTokenValid(request)) {
+            String token = request.getHeader(AUTHORIZATION).substring(TOKEN_PREFIX.length());
+            UserDTO user = userService.getUserById(tokenProvider.getSubject(token, request));
+            return ResponseEntity.ok().body(
+                    HttpResponse.builder()
+                            .timeStamp(now().toString())
+                            .data(of("user", user, "access_token", tokenProvider.createAccessToken(getUserPrincipal(user))
+                                    , "refresh_token", token))
+                            .message("Token refreshed")
+                            .status(OK)
+                            .statusCode(OK.value())
+                            .build());
+        } else {
+            return ResponseEntity.badRequest().body(
+                    HttpResponse.builder()
+                            .timeStamp(now().toString())
+                            .reason("Refresh Token missing or invalid")
+                            .developerMessage("Refresh Token missing or invalid")
+                            .status(BAD_REQUEST)
+                            .statusCode(BAD_REQUEST.value())
+                            .build());
+        }
+    }
+
+    private boolean isHeaderAndTokenValid(HttpServletRequest request) {
+        return  request.getHeader(AUTHORIZATION) != null
+                &&  request.getHeader(AUTHORIZATION).startsWith(TOKEN_PREFIX)
+                && tokenProvider.isTokenValid(
+                tokenProvider.getSubject(request.getHeader(AUTHORIZATION).substring(TOKEN_PREFIX.length()), request),
+                request.getHeader(AUTHORIZATION).substring(TOKEN_PREFIX.length())
+        );
+    }
+
+    @RequestMapping("/error")
+    public ResponseEntity<HttpResponse> handleError(HttpServletRequest request) {
+        return ResponseEntity.badRequest().body(
+                HttpResponse.builder()
+                        .timeStamp(now().toString())
+                        .reason("There is no mapping for a " + request.getMethod() + " request for this path on the server")
+                        .status(BAD_REQUEST)
+                        .statusCode(BAD_REQUEST.value())
+                        .build());
+    }
+
+    /*@RequestMapping("/error")
+    public ResponseEntity<HttpResponse> handleError(HttpServletRequest request) {
+        return new ResponseEntity<>(HttpResponse.builder()
+                .timeStamp(now().toString())
+                .reason("There is no mapping for a " + request.getMethod() + " request for this path on the server")
+                .status(NOT_FOUND)
+                .statusCode(NOT_FOUND.value())
+                .build(), NOT_FOUND);
+    }*/
 
     private UserDTO authenticate(String email, String password) {
-        log.info("Authenticating user with email: {}", email);
+        log.info("Authentication attempt for email: {}", email);
         UserDTO userByEmail = userService.getUserByEmail(email);
+
         try {
             if (userByEmail != null) {
+                log.info("User found in database. Email: {}", email);
                 publisher.publishEvent(new NewUserEvent(email, LOGIN_ATTEMPT));
+            } else {
+                log.warn("Authentication failed. No user found with email: {}", email);
             }
+
+            log.debug("Attempting authentication with AuthenticationManager.");
             Authentication authentication = authenticationManager.authenticate(unauthenticated(email, password));
+            log.info("Authentication successful for email: {}", email);
+
             UserDTO loggedInUser = getLoggedInUser(authentication);
+            log.info("User authenticated: {} (MFA: {})", loggedInUser.getEmail(), loggedInUser.isUsingMfa());
+
             if (!loggedInUser.isUsingMfa()) {
+                log.info("Publishing LOGIN_ATTEMPT_SUCCESS event for email: {}", email);
                 publisher.publishEvent(new NewUserEvent(email, LOGIN_ATTEMPT_SUCCESS));
             }
-            log.info("Authentication successful for email: {}", email);
+
             return loggedInUser;
         } catch (Exception exception) {
+            log.error("Authentication failed for email: {}. Error: {}", email, exception.getMessage());
+
             if (userByEmail != null) {
+                log.warn("Publishing LOGIN_ATTEMPT_FAILURE event for email: {}", email);
                 publisher.publishEvent(new NewUserEvent(email, LOGIN_ATTEMPT_FAILURE));
             }
-            log.error("Authentication failed for email: {}. Error: {}", email, exception.getMessage());
+
             processError(request, response, exception);
             throw new ApiException(exception.getMessage());
         }
     }
 
+
     private URI getUri() {
-        log.debug("Building URI for new user.");
         return URI.create(fromCurrentContextPath().path("/user/get/<userId>").toUriString());
     }
 
     private ResponseEntity<HttpResponse> sendResponse(UserDTO user) {
-        log.info("Sending response for user: {}", user.getEmail());
         return ResponseEntity.ok().body(
                 HttpResponse.builder()
                         .timeStamp(now().toString())
@@ -150,14 +383,11 @@ public class UserResource {
     }
 
     private UserPrincipal getUserPrincipal(UserDTO user) {
-        log.debug("Getting UserPrincipal for user: {}", user.getEmail());
         return new UserPrincipal(toUser(userService.getUserByEmail(user.getEmail())), roleService.getRoleByUserId(user.getId()));
     }
 
     private ResponseEntity<HttpResponse> sendVerificationCode(UserDTO user) {
-        log.info("Sending verification code to user: {}", user.getEmail());
         userService.sendVerificationCode(user);
-        log.info("Verification code sent to user: {}", user.getEmail());
         return ResponseEntity.ok().body(
                 HttpResponse.builder()
                         .timeStamp(now().toString())
@@ -168,22 +398,3 @@ public class UserResource {
                         .build());
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
